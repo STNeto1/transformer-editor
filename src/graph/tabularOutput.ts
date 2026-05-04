@@ -2,76 +2,24 @@ import type { Edge } from "@xyflow/react";
 import type { AppNode, CsvPayload } from "../types/flow";
 import {
   collectRowSourceToPayload,
-  rowSourceFromPayload,
   countRowsInRowSource,
+  rowSourceFromPayload,
   type RowSource,
 } from "./rowSource";
-import { upstreamSubgraphStaleKey } from "./tabularStaleKey";
-import { executeShared, maybeLogSharedExecutionCacheStats } from "./tabularExecutionCache";
-import { createSemaphore } from "./asyncSemaphore";
-import { createTabularGraphRunForEdge } from "./tabularGraphRun";
 
-const rowCountLane = createSemaphore(3);
 type ResolveOpts = { limit?: number; signal?: AbortSignal; consumer?: string };
 
-const GRAPH_RUN_CACHE_TTL_MS = 20_000;
-const graphRunSessionCache = new Map<
-  string,
-  { run: ReturnType<typeof createTabularGraphRunForEdge>; expiresAt: number }
->();
+const EMPTY_PAYLOAD: CsvPayload = { headers: [], rows: [] };
 
-function plannerRequestKey(
-  sourceId: string,
-  sourceHandle: string | null,
-  nodes: AppNode[],
-  edges: Edge[],
-  opts?: ResolveOpts,
-): string {
-  const stale = upstreamSubgraphStaleKey(sourceId, edges, nodes);
-  return `${sourceId}::${sourceHandle ?? "node"}::${opts?.limit ?? "none"}::${opts?.consumer ?? "unknown"}::${stale}`;
-}
-
-function rowCountCacheKey(edge: Edge, nodes: AppNode[], edges: Edge[]): string {
-  const stale = upstreamSubgraphStaleKey(edge.source, edges, nodes);
-  return `${edge.source}::${edge.sourceHandle ?? "node"}::${stale}`;
-}
-
-function graphRunSessionKey(edge: Edge, nodes: AppNode[], edges: Edge[]): string {
-  const stale = upstreamSubgraphStaleKey(edge.source, edges, nodes);
-  return `${edge.source}::${edge.sourceHandle ?? "node"}::${stale}`;
-}
-
-async function getSharedTabularGraphRunForEdge(
-  incomingEdge: Edge,
-  nodes: AppNode[],
-  edges: Edge[],
-): Promise<ReturnType<typeof createTabularGraphRunForEdge>> {
-  const key = graphRunSessionKey(incomingEdge, nodes, edges);
-  const now = Date.now();
-  const cached = graphRunSessionCache.get(key);
-  if (cached != null && cached.expiresAt > now) return cached.run;
-  if (cached != null) graphRunSessionCache.delete(key);
-  return executeShared(
-    `graphRun:${key}`,
-    async () => {
-      const run = createTabularGraphRunForEdge(incomingEdge, nodes, edges);
-      graphRunSessionCache.set(key, { run, expiresAt: Date.now() + GRAPH_RUN_CACHE_TTL_MS });
-      if (graphRunSessionCache.size > 256) {
-        for (const [cacheKey, entry] of graphRunSessionCache) {
-          if (entry.expiresAt <= Date.now()) graphRunSessionCache.delete(cacheKey);
-        }
-      }
-      return run;
-    },
-    { cacheResolved: false },
-  );
+function emptyRowSource(): RowSource {
+  return rowSourceFromPayload(EMPTY_PAYLOAD);
 }
 
 export function __clearTabularGraphRunSessionCacheForTests(): void {
-  graphRunSessionCache.clear();
+  // no-op: execution engine removed
 }
 
-/** Async view of tabular output as a row iterator (strict SQL graph run). */
+/** Editor-only mode: returns an empty row source. */
 export async function getTabularOutputAsync(
   nodeId: string,
   nodes: AppNode[],
@@ -79,16 +27,15 @@ export async function getTabularOutputAsync(
   visited: Set<string> = new Set(),
   opts?: ResolveOpts,
 ): Promise<RowSource> {
+  void nodeId;
+  void nodes;
+  void edges;
   void visited;
   void opts;
-  const synthetic: Edge = {
-    id: `__node_output__:${nodeId}`,
-    source: nodeId,
-    target: `__node_output_target__:${nodeId}`,
-  };
-  return (await getSharedTabularGraphRunForEdge(synthetic, nodes, edges)).rowSource();
+  return emptyRowSource();
 }
 
+/** Editor-only mode: returns an empty row source. */
 export async function getTabularOutputForEdgeAsync(
   incomingEdge: Edge,
   nodes: AppNode[],
@@ -96,22 +43,15 @@ export async function getTabularOutputForEdgeAsync(
   visited: Set<string> = new Set(),
   opts?: ResolveOpts,
 ): Promise<RowSource> {
+  void incomingEdge;
+  void nodes;
+  void edges;
   void visited;
-  const reqKey = plannerRequestKey(
-    incomingEdge.source,
-    incomingEdge.sourceHandle ?? null,
-    nodes,
-    edges,
-    opts,
-  );
-  return executeShared(
-    `rowSource:v3:${reqKey}`,
-    async () => (await getSharedTabularGraphRunForEdge(incomingEdge, nodes, edges)).rowSource(),
-    { cacheResolved: false },
-  );
+  void opts;
+  return emptyRowSource();
 }
 
-/** Full tabular payload for an edge via strict graph-run execution. */
+/** Editor-only mode: returns null payload. */
 export async function getTabularPayloadForEdgeAsync(
   incomingEdge: Edge,
   nodes: AppNode[],
@@ -119,59 +59,52 @@ export async function getTabularPayloadForEdgeAsync(
   visited: Set<string> = new Set(),
   opts?: ResolveOpts,
 ): Promise<CsvPayload | null> {
+  void incomingEdge;
+  void nodes;
+  void edges;
   void visited;
   void opts;
-  return (await getSharedTabularGraphRunForEdge(incomingEdge, nodes, edges)).payload();
+  return null;
 }
 
-/** Alias: pull-based row source for an incoming edge via strict graph-run execution. */
 export const getRowSourceForEdgeAsync = getTabularOutputForEdgeAsync;
 
+/** Editor-only mode: always empty preview. */
 export async function getPreviewForEdgeAsync(
   incomingEdge: Edge,
   nodes: AppNode[],
   edges: Edge[],
   limit: number,
 ): Promise<{ headers: string[]; rows: Record<string, string>[] }> {
-  const requested = Math.max(0, Math.floor(limit));
-  const reqKey = plannerRequestKey(
-    incomingEdge.source,
-    incomingEdge.sourceHandle ?? null,
-    nodes,
-    edges,
-    { limit: requested, consumer: "visualization-preview" },
-  );
-  const result = await executeShared(
-    `preview:${reqKey}`,
-    async () =>
-      (await getSharedTabularGraphRunForEdge(incomingEdge, nodes, edges)).preview(requested),
-    { cacheResolved: false },
-  );
-  maybeLogSharedExecutionCacheStats("preview");
-  return result;
+  void incomingEdge;
+  void nodes;
+  void edges;
+  void limit;
+  return EMPTY_PAYLOAD;
 }
 
+/** Editor-only mode: always 0 rows. */
 export async function getRowCountForEdgeAsync(
   incomingEdge: Edge,
   nodes: AppNode[],
   edges: Edge[],
 ): Promise<number | null> {
-  const cacheKey = rowCountCacheKey(incomingEdge, nodes, edges);
-  const result = await rowCountLane.run(() =>
-    executeShared(`rowCount:${cacheKey}`, async () =>
-      (await getSharedTabularGraphRunForEdge(incomingEdge, nodes, edges)).rowCount(),
-    ),
-  );
-  maybeLogSharedExecutionCacheStats("rowCount");
-  return result;
+  void incomingEdge;
+  void nodes;
+  void edges;
+  return 0;
 }
 
+/** Editor-only mode: no generated CSV output. */
 export async function downloadCsvForEdgeAsync(
   incomingEdge: Edge,
   nodes: AppNode[],
   edges: Edge[],
 ): Promise<Blob | null> {
-  return (await getSharedTabularGraphRunForEdge(incomingEdge, nodes, edges)).downloadCsv();
+  void incomingEdge;
+  void nodes;
+  void edges;
+  return null;
 }
 
 export { collectRowSourceToPayload, rowSourceFromPayload, type RowSource, countRowsInRowSource };

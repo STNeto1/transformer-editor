@@ -1,5 +1,3 @@
-import { ensureDuckDbReady } from "./src/engine/duckdb";
-
 // Polyfill Blob.stream() for jsdom
 if (typeof Blob !== "undefined" && !Blob.prototype.stream) {
   // @ts-ignore
@@ -15,7 +13,3 @@ if (typeof Blob !== "undefined" && !Blob.prototype.stream) {
     });
   };
 }
-
-// Initialize DuckDB once before all tests
-// This reduces per-test overhead by sharing the WASM initialization
-await ensureDuckDbReady();

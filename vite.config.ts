@@ -5,10 +5,6 @@ import tailwindcss from "@tailwindcss/vite";
 
 // https://vite.dev/config/
 export default defineConfig({
-  assetsInclude: ["**/*.wasm"],
-  worker: {
-    format: "es",
-  },
   plugins: [tailwindcss(), react(), babel({ presets: [reactCompilerPreset()] })],
   test: {
     environment: "jsdom",

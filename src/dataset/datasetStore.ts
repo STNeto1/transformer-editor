@@ -1,13 +1,7 @@
 import type { CsvPayload } from "../types/flow";
-import { DuckDBDataProtocol } from "@duckdb/duckdb-wasm";
-import { validateIngestRowCount } from "../ingestLimits";
 import { parseCsvText, parseJsonArrayToCsvPayload } from "../httpFetch/runHttpFetch";
 import { iterateCsvRowsFromFile, iterateNdjsonRowsFromUint8Stream } from "../httpFetch/streamRows";
-import { linesFromUint8Stream } from "./lineBytes";
 import type { DatasetFormat, DatasetId, DatasetMeta, DatasetScanOptions } from "./types";
-import { ensureDuckDbReady } from "../engine/duckdb";
-import { getDuckDb } from "../engine/duckdb";
-import { quoteSqlIdent, quoteSqlString } from "../sql/sqlQuote";
 
 export type { DatasetFormat, DatasetId, DatasetMeta, DatasetScanOptions };
 
@@ -17,238 +11,34 @@ export type DatasetSqlSource = {
   cleanup(): Promise<void>;
 };
 
-type CachedSqlSource = {
-  headers: string[];
-  fromSql: string;
-  dropFileName?: string;
-};
-
 const DB_NAME = "etl-ui-datasets";
 const DB_VERSION = 1;
 const STORE = "datasets";
-
-/** Prefer OPFS for row bodies when estimated raw bytes exceed this. */
-const OPFS_BODY_CHAR_THRESHOLD = 2 * 1024 * 1024;
-
 const SAMPLE_ROWS = 50;
-const INGEST_ORDINAL_COLUMN = "__etl_row_ordinal";
-const SCAN_CHUNK_SIZE = 1_000;
 
-type IdbRow = {
+type StoredDataset = {
   id: DatasetId;
   meta: DatasetMeta;
-  bodyInline: string | null;
-  /** NDJSON body under OPFS at `etl-datasets/{id}/rows.ndjson`. */
-  opfsRelPath: string | null;
+  rows: Record<string, string>[];
 };
 
 function newId(): DatasetId {
   return crypto.randomUUID();
 }
 
-function takeSampleRow(sample: Record<string, string>[], row: Record<string, string>): void {
-  if (sample.length >= SAMPLE_ROWS) return;
-  sample.push({ ...row });
+function normalizeRow(headers: string[], sparse: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const h of headers) out[h] = sparse[h] ?? "";
+  return out;
 }
 
 function mergeHeaderOrder(existing: string[], row: Record<string, string>): void {
   const seen = new Set(existing);
-  for (const k of Object.keys(row)) {
-    if (!seen.has(k)) {
-      seen.add(k);
-      existing.push(k);
+  for (const key of Object.keys(row)) {
+    if (!seen.has(key)) {
+      seen.add(key);
+      existing.push(key);
     }
-  }
-}
-
-function normalizeScanRow(
-  headers: string[],
-  sparse: Record<string, string>,
-): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const h of headers) {
-    out[h] = sparse[h] ?? "";
-  }
-  return out;
-}
-
-function scalarToCell(value: unknown): string {
-  if (value == null) return "";
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
-    return String(value);
-  }
-  if (value instanceof Date) return value.toISOString();
-  return JSON.stringify(value);
-}
-
-function tableToRows(
-  table: unknown,
-  headers: string[],
-): Array<Record<string, string> & { __ord?: number | string }> {
-  const anyTable = table as {
-    numRows: number;
-    schema: { fields: Array<{ name: string }> };
-    getChildAt: (index: number) => { get: (row: number) => unknown } | null;
-  };
-  const colIndex = new Map<string, number>();
-  anyTable.schema.fields.forEach((f, i) => colIndex.set(f.name, i));
-
-  const out: Array<Record<string, string> & { __ord?: number | string }> = [];
-  for (let rowIndex = 0; rowIndex < anyTable.numRows; rowIndex++) {
-    const row: Record<string, string> & { __ord?: number | string } = {};
-    for (const h of headers) {
-      const idx = colIndex.get(h);
-      const child = idx == null ? null : anyTable.getChildAt(idx);
-      row[h] = child == null ? "" : scalarToCell(child.get(rowIndex));
-    }
-    const ordIdx = colIndex.get(INGEST_ORDINAL_COLUMN);
-    const ordChild = ordIdx == null ? null : anyTable.getChildAt(ordIdx);
-    if (ordChild != null) {
-      const ord = ordChild.get(rowIndex);
-      if (typeof ord === "number" || typeof ord === "string") {
-        row.__ord = ord;
-      } else if (typeof ord === "bigint") {
-        row.__ord = ord.toString();
-      }
-    }
-    out.push(row);
-  }
-  return out;
-}
-
-async function queryScanRows(
-  id: DatasetId,
-  row: IdbRow,
-  headers: string[],
-  offset: number,
-  limit?: number,
-): Promise<Record<string, string>[]> {
-  const db = await getDuckDb();
-  const conn = await db.connect();
-  const fileName = `scan-${id}-${crypto.randomUUID()}.ndjson`;
-
-  try {
-    if (row.opfsRelPath != null) {
-      const opfsFile = await readOpfsNdjsonFile(id);
-      if (opfsFile == null) return [];
-      await db.registerFileHandle(fileName, opfsFile, DuckDBDataProtocol.BROWSER_FILEREADER, false);
-    } else {
-      await db.registerFileText(fileName, row.bodyInline ?? "");
-    }
-
-    // In Node.js test environment, use absolute path for file access
-    let filePathForSql = fileName;
-    if (typeof process !== "undefined" && process.env?.VITEST === "true") {
-      // @ts-ignore - getRegisteredFilePath exists in Node.js adapter
-      const absolutePath = db.getRegisteredFilePath?.(fileName);
-      if (absolutePath) {
-        filePathForSql = absolutePath;
-      }
-    }
-
-    const selectCols = headers.map((h) => quoteSqlIdent(h)).join(", ");
-    const baseSql =
-      `SELECT ${selectCols}, ${quoteSqlIdent(INGEST_ORDINAL_COLUMN)} ` +
-      `FROM read_ndjson_auto(${quoteSqlString(filePathForSql)}) ` +
-      `ORDER BY ${quoteSqlIdent(INGEST_ORDINAL_COLUMN)} ASC`;
-
-    const allRows: Record<string, string>[] = [];
-    let scanned = 0;
-    let remaining = limit;
-    for (;;) {
-      const batchLimit = remaining == null ? SCAN_CHUNK_SIZE : Math.min(SCAN_CHUNK_SIZE, remaining);
-      if (batchLimit <= 0) break;
-      const sql = `${baseSql} LIMIT ${batchLimit} OFFSET ${offset + scanned}`;
-      const table = await conn.query(sql);
-      const rows = tableToRows(table, headers);
-      if (rows.length === 0) break;
-      for (const r of rows) {
-        allRows.push(normalizeScanRow(headers, r));
-      }
-      scanned += rows.length;
-      if (remaining != null) {
-        remaining -= rows.length;
-        if (remaining <= 0) break;
-      }
-      if (rows.length < batchLimit) break;
-    }
-    return allRows;
-  } finally {
-    await conn.close();
-    await db.dropFile(fileName).catch(() => undefined);
-  }
-}
-
-async function scanRowsFromNdjsonFallback(
-  id: DatasetId,
-  row: IdbRow,
-  headers: string[],
-  offset: number,
-  limit?: number,
-): Promise<Record<string, string>[]> {
-  const out: Record<string, string>[] = [];
-  let emitted = 0;
-  let skipped = 0;
-  async function consume(stream: ReadableStream<Uint8Array>): Promise<void> {
-    for await (const line of linesFromUint8Stream(stream)) {
-      if (!line.trim()) continue;
-      if (skipped < offset) {
-        skipped++;
-        continue;
-      }
-      if (limit != null && emitted >= limit) break;
-      try {
-        const obj = JSON.parse(line) as Record<string, string>;
-        out.push(normalizeScanRow(headers, obj));
-      } catch {
-        // skip malformed row
-      }
-      emitted++;
-    }
-  }
-
-  if (row.opfsRelPath != null) {
-    const file = await readOpfsNdjsonFile(id);
-    if (file != null) {
-      await consume(file.stream());
-      return out;
-    }
-  }
-  const body = row.bodyInline ?? "";
-  if (!body) return out;
-  await consume(new Blob([body]).stream() as unknown as ReadableStream<Uint8Array>);
-  return out;
-}
-
-async function getOpfsDatasetDir(): Promise<FileSystemDirectoryHandle | null> {
-  try {
-    const root = await navigator.storage.getDirectory();
-    return await root.getDirectoryHandle("etl-datasets", { create: true });
-  } catch {
-    return null;
-  }
-}
-
-async function openOpfsRowsWritable(id: DatasetId): Promise<FileSystemWritableFileStream | null> {
-  const base = await getOpfsDatasetDir();
-  if (base == null) return null;
-  try {
-    const dir = await base.getDirectoryHandle(id, { create: true });
-    const fh = await dir.getFileHandle("rows.ndjson", { create: true });
-    return await fh.createWritable();
-  } catch {
-    return null;
-  }
-}
-
-async function deleteOpfsDatasetDir(id: DatasetId): Promise<void> {
-  const base = await getOpfsDatasetDir();
-  if (base == null) return;
-  try {
-    await base.removeEntry(id, { recursive: true });
-  } catch {
-    // ignore
   }
 }
 
@@ -282,27 +72,18 @@ async function openDb(): Promise<IDBDatabase | null> {
   });
 }
 
-function fileByteLength(f: File): number {
-  return typeof f.size === "number" ? f.size : 0;
+async function readById(id: DatasetId): Promise<StoredDataset | null> {
+  const db = await openDb();
+  if (db == null) return null;
+  const tx = db.transaction(STORE, "readonly");
+  const raw = await requestToPromise(tx.objectStore(STORE).get(id));
+  await transactionDone(tx);
+  db.close();
+  if (raw == null || typeof raw !== "object") return null;
+  return raw as StoredDataset;
 }
 
-async function streamToText(input: ReadableStream<Uint8Array> | File): Promise<string> {
-  if (input instanceof File) {
-    return input.text();
-  }
-  const decoder = new TextDecoder();
-  let out = "";
-  const reader = input.getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) out += decoder.decode(value, { stream: true });
-  }
-  out += decoder.decode();
-  return out;
-}
-
-async function persistIdbRow(row: IdbRow): Promise<void> {
+async function persist(row: StoredDataset): Promise<void> {
   const db = await openDb();
   if (db == null) throw new Error("IndexedDB unavailable");
   const tx = db.transaction(STORE, "readwrite");
@@ -311,164 +92,34 @@ async function persistIdbRow(row: IdbRow): Promise<void> {
   db.close();
 }
 
-async function readIdbRowById(id: DatasetId): Promise<IdbRow | null> {
-  const db = await openDb();
-  if (db == null) return null;
-  const tx = db.transaction(STORE, "readonly");
-  const raw = await requestToPromise(tx.objectStore(STORE).get(id));
-  await transactionDone(tx);
-  db.close();
-  if (raw == null || typeof raw !== "object") return null;
-  return raw as IdbRow;
+function estimatePayloadBytes(payload: CsvPayload): number {
+  const enc = new TextEncoder();
+  let n = 0;
+  for (const row of payload.rows) n += enc.encode(`${JSON.stringify(row)}\n`).byteLength;
+  return n;
 }
 
-/**
- * Stream rows to NDJSON storage (OPFS append or inline string) without holding all rows in memory.
- */
-async function ingestNdjsonLines(
+function buildStoredDataset(
   format: DatasetFormat,
-  byteHint: number,
-  useOpfs: boolean,
-  headersAcc: string[],
-  rows: AsyncIterable<Record<string, string>>,
-): Promise<DatasetMeta> {
+  headers: string[],
+  rows: Record<string, string>[],
+  bytes: number,
+): StoredDataset {
+  const normalizedRows = rows.map((row) => normalizeRow(headers, row));
   const id = newId();
-  const sample: Record<string, string>[] = [];
-  let rowCount = 0;
-  let writtenBytes = 0;
-  const encoder = new TextEncoder();
-  let opfsWriter: FileSystemWritableFileStream | null = null;
-  let inline = "";
-  let opfsBuffer = "";
-  const OPFS_WRITE_BUFFER_BYTES = 256 * 1024;
-
-  if (useOpfs) {
-    opfsWriter = await openOpfsRowsWritable(id);
-  }
-
-  try {
-    let ordinal = 0;
-    for await (const row of rows) {
-      if (format === "ndjson") {
-        mergeHeaderOrder(headersAcc, row);
-      }
-      const normalized = normalizeScanRow(headersAcc, row);
-      const lineObj: Record<string, string | number> = {
-        ...normalized,
-        [INGEST_ORDINAL_COLUMN]: ordinal,
-      };
-      const line = `${JSON.stringify(lineObj)}\n`;
-      const chunk = encoder.encode(line);
-      writtenBytes += chunk.byteLength;
-      takeSampleRow(sample, normalized);
-      rowCount++;
-      ordinal++;
-      const chk = validateIngestRowCount(rowCount);
-      if (chk.ok === false) {
-        throw new Error(chk.error);
-      }
-      if (opfsWriter != null) {
-        opfsBuffer += line;
-        if (opfsBuffer.length >= OPFS_WRITE_BUFFER_BYTES) {
-          await opfsWriter.write(opfsBuffer);
-          opfsBuffer = "";
-        }
-      } else {
-        inline += line;
-      }
-    }
-    if (opfsWriter != null) {
-      if (opfsBuffer.length > 0) {
-        await opfsWriter.write(opfsBuffer);
-      }
-      await opfsWriter.close();
-    }
-  } catch (e) {
-    if (opfsWriter != null) {
-      try {
-        await opfsWriter.close();
-      } catch {
-        /* ignore */
-      }
-    }
-    await deleteOpfsDatasetDir(id);
-    throw e;
-  }
-
-  const headers = headersAcc;
-  const meta: DatasetMeta = {
+  return {
     id,
-    headers,
-    rowCount,
-    sample,
-    bytes: Math.max(writtenBytes, byteHint),
-    format,
-    createdAt: Date.now(),
+    rows: normalizedRows,
+    meta: {
+      id,
+      headers,
+      rowCount: normalizedRows.length,
+      sample: normalizedRows.slice(0, SAMPLE_ROWS),
+      bytes,
+      format,
+      createdAt: Date.now(),
+    },
   };
-
-  let bodyInline: string | null = inline;
-  let opfsRelPath: string | null = null;
-  if (opfsWriter != null) {
-    bodyInline = null;
-    opfsRelPath = `${id}/rows.ndjson`;
-  } else if (inline.length >= OPFS_BODY_CHAR_THRESHOLD) {
-    const w2 = await openOpfsRowsWritable(id);
-    if (w2 != null) {
-      await w2.write(inline);
-      await w2.close();
-      bodyInline = null;
-      opfsRelPath = `${id}/rows.ndjson`;
-    }
-  }
-
-  await persistIdbRow({
-    id,
-    meta,
-    bodyInline,
-    opfsRelPath,
-  });
-  return meta;
-}
-
-async function readOpfsNdjsonFile(id: DatasetId): Promise<File | null> {
-  const base = await getOpfsDatasetDir();
-  if (base == null) return null;
-  try {
-    const dir = await base.getDirectoryHandle(id);
-    const fh = await dir.getFileHandle("rows.ndjson");
-    return await fh.getFile();
-  } catch {
-    return null;
-  }
-}
-
-async function readOpfsParquetFile(id: DatasetId): Promise<File | null> {
-  const base = await getOpfsDatasetDir();
-  if (base == null) return null;
-  try {
-    const dir = await base.getDirectoryHandle(id);
-    const fh = await dir.getFileHandle("dataset.parquet");
-    return await fh.getFile();
-  } catch {
-    return null;
-  }
-}
-
-async function writeOpfsParquetFile(id: DatasetId, bytes: Uint8Array): Promise<string | null> {
-  const base = await getOpfsDatasetDir();
-  if (base == null) return null;
-  try {
-    const dir = await base.getDirectoryHandle(id, { create: true });
-    const fh = await dir.getFileHandle("dataset.parquet", { create: true });
-    const w = await fh.createWritable();
-    const safe = new Uint8Array(bytes.byteLength);
-    safe.set(bytes);
-    await w.write(safe);
-    await w.close();
-    return `${id}/dataset.parquet`;
-  } catch {
-    return null;
-  }
 }
 
 export interface DatasetStore {
@@ -489,295 +140,96 @@ export interface DatasetStore {
 }
 
 export function createDatasetStore(): DatasetStore {
-  const sqlSourceByDatasetId = new Map<DatasetId, CachedSqlSource>();
-  const sqlInitByDatasetId = new Map<DatasetId, Promise<CachedSqlSource>>();
-  const canonicalParquetInitByDatasetId = new Map<DatasetId, Promise<IdbRow>>();
-
-  async function materializeCanonicalParquetIfNeeded(row: IdbRow): Promise<IdbRow> {
-    const inFlight = canonicalParquetInitByDatasetId.get(row.id);
-    if (inFlight != null) {
-      return inFlight;
-    }
-    const init = (async () => {
-      if (row.meta.canonicalParquetOpfsRelPath) {
-        const existingParquet = await readOpfsParquetFile(row.id);
-        if (existingParquet != null) return row;
-      }
-      if (row.opfsRelPath == null) return row;
-      const opfsNdjson = await readOpfsNdjsonFile(row.id);
-      if (opfsNdjson == null) return row;
-      const db = await getDuckDb();
-      const srcName = `canon-src-${row.id}-${crypto.randomUUID()}.ndjson`;
-      const outName = `canon-out-${row.id}-${crypto.randomUUID()}.parquet`;
-      await db.registerFileHandle(
-        srcName,
-        opfsNdjson,
-        DuckDBDataProtocol.BROWSER_FILEREADER,
-        false,
-      );
-
-      // In Node.js test environment, use absolute paths
-      let srcPathForSql = srcName;
-      let outPathForSql = outName;
-      if (typeof process !== "undefined" && process.env?.VITEST === "true") {
-        // @ts-ignore - getRegisteredFilePath exists in Node.js adapter
-        const srcAbsolute = db.getRegisteredFilePath?.(srcName);
-        if (srcAbsolute) srcPathForSql = srcAbsolute;
-        // @ts-ignore - getFilePathForWrite exists in Node.js adapter
-        const outAbsolute = db.getFilePathForWrite?.(outName);
-        if (outAbsolute) outPathForSql = outAbsolute;
-      }
-
-      try {
-        const conn = await db.connect();
-        try {
-          await conn.query(
-            `COPY (SELECT * FROM read_ndjson_auto(${quoteSqlString(srcPathForSql)})) TO ${quoteSqlString(outPathForSql)} (FORMAT PARQUET)`,
-          );
-        } finally {
-          await conn.close();
-        }
-        const parquetBytes = await db.copyFileToBuffer(outName);
-        const written = await writeOpfsParquetFile(row.id, parquetBytes);
-        if (written == null) return row;
-        const next: IdbRow = {
-          ...row,
-          meta: {
-            ...row.meta,
-            canonicalParquetOpfsRelPath: written,
-          },
-        };
-        await persistIdbRow(next);
-        return next;
-      } catch (error) {
-        console.warn(
-          `[dataset-store] canonical parquet materialization skipped for dataset=${row.id}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-        return row;
-      } finally {
-        await db.dropFile(srcName).catch(() => undefined);
-        await db.dropFile(outName).catch(() => undefined);
-      }
-    })();
-    canonicalParquetInitByDatasetId.set(row.id, init);
-    try {
-      return await init;
-    } finally {
-      canonicalParquetInitByDatasetId.delete(row.id);
-    }
-  }
-
-  async function ensureSqlSourceForDataset(id: DatasetId): Promise<CachedSqlSource | null> {
-    const existing = sqlSourceByDatasetId.get(id);
-    if (existing != null) return existing;
-    const inFlight = sqlInitByDatasetId.get(id);
-    if (inFlight != null) return inFlight;
-
-    const init = (async () => {
-      let row = await readIdbRowById(id);
-      if (row == null) throw new Error(`dataset ${id} not found`);
-      row = await materializeCanonicalParquetIfNeeded(row);
-      const db = await getDuckDb();
-
-      if (row.meta.canonicalParquetOpfsRelPath != null) {
-        const pq = await readOpfsParquetFile(id);
-        if (pq != null) {
-          const fileName = `dataset-${id}.parquet`;
-          await db.registerFileHandle(fileName, pq, DuckDBDataProtocol.BROWSER_FILEREADER, false);
-
-          let filePathForSql = fileName;
-          // Always check if we have the getRegisteredFilePath method (Node.js adapter)
-          // @ts-ignore - getRegisteredFilePath exists in Node.js adapter
-          const absolutePath = db.getRegisteredFilePath?.(fileName);
-          if (absolutePath) {
-            filePathForSql = absolutePath;
-          }
-
-          const cached: CachedSqlSource = {
-            headers: [...(row.meta.headers ?? [])],
-            fromSql: `read_parquet(${quoteSqlString(filePathForSql)})`,
-          };
-          sqlSourceByDatasetId.set(id, cached);
-          return cached;
-        }
-      }
-
-      const fileName = `dataset-${id}-${crypto.randomUUID()}.ndjson`;
-      if (row.opfsRelPath != null) {
-        const opfsFile = await readOpfsNdjsonFile(id);
-        if (opfsFile == null) throw new Error(`dataset ${id} OPFS rows missing`);
-        await db.registerFileHandle(
-          fileName,
-          opfsFile,
-          DuckDBDataProtocol.BROWSER_FILEREADER,
-          false,
-        );
-      } else {
-        await db.registerFileText(fileName, row.bodyInline ?? "");
-      }
-
-      // In Node.js test environment, use absolute path for file access
-      let filePathForSql = fileName;
-      // Always check if we have the getRegisteredFilePath method (Node.js adapter)
-      // @ts-ignore - getRegisteredFilePath exists in Node.js adapter
-      const absolutePath = db.getRegisteredFilePath?.(fileName);
-      if (absolutePath) {
-        filePathForSql = absolutePath;
-      }
-
-      const cached: CachedSqlSource = {
-        headers: [...(row.meta.headers ?? [])],
-        fromSql: `read_ndjson_auto(${quoteSqlString(filePathForSql)})`,
-        dropFileName: fileName,
-      };
-      sqlSourceByDatasetId.set(id, cached);
-      return cached;
-    })();
-
-    sqlInitByDatasetId.set(id, init);
-    try {
-      return await init;
-    } finally {
-      sqlInitByDatasetId.delete(id);
-    }
-  }
-
   return {
     async putCsv(input) {
-      await ensureDuckDbReady();
-      if (!(input instanceof File)) {
-        const text = await streamToText(input);
-        const parsed = parseCsvText(text);
-        if ("error" in parsed) throw new Error(parsed.error);
-        const hint = new TextEncoder().encode(text).byteLength;
-        return ingestNdjsonLines(
-          "csv",
-          hint,
-          hint >= OPFS_BODY_CHAR_THRESHOLD,
-          [...parsed.csv.headers],
-          (async function* () {
-            for (const r of parsed.csv.rows) {
-              yield normalizeScanRow(parsed.csv.headers, r);
-            }
-          })(),
-        );
-      }
-      const hint = fileByteLength(input);
-      const useOpfs = hint >= OPFS_BODY_CHAR_THRESHOLD;
-      const headersAcc: string[] = [];
-      const rows = iterateCsvRowsFromFile(input, (h) => {
-        headersAcc.length = 0;
-        headersAcc.push(...h);
-      });
-      return ingestNdjsonLines("csv", hint, useOpfs, headersAcc, rows);
-    },
-
-    async putNdjson(input) {
-      await ensureDuckDbReady();
       if (input instanceof File) {
-        const hint = fileByteLength(input);
-        const useOpfs = hint >= OPFS_BODY_CHAR_THRESHOLD;
         const headersAcc: string[] = [];
-        return ingestNdjsonLines(
-          "ndjson",
-          hint,
-          useOpfs,
-          headersAcc,
-          iterateNdjsonRowsFromUint8Stream(input.stream()),
-        );
+        const rows: Record<string, string>[] = [];
+        for await (const row of iterateCsvRowsFromFile(input, (headers) => {
+          headersAcc.length = 0;
+          headersAcc.push(...headers);
+        })) {
+          rows.push(normalizeRow(headersAcc, row));
+        }
+        const stored = buildStoredDataset("csv", headersAcc, rows, input.size ?? 0);
+        await persist(stored);
+        return stored.meta;
       }
-      return ingestNdjsonLines("ndjson", 0, true, [], iterateNdjsonRowsFromUint8Stream(input));
+
+      const decoder = new TextDecoder();
+      const reader = input.getReader();
+      let text = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) text += decoder.decode(value, { stream: true });
+      }
+      text += decoder.decode();
+      const parsed = parseCsvText(text);
+      if ("error" in parsed) throw new Error(parsed.error);
+      const stored = buildStoredDataset(
+        "csv",
+        parsed.csv.headers,
+        parsed.csv.rows,
+        new TextEncoder().encode(text).byteLength,
+      );
+      await persist(stored);
+      return stored.meta;
     },
 
     async putJson(input, jsonArrayPath) {
-      await ensureDuckDbReady();
-      const text = input instanceof File ? await input.text() : await streamToText(input);
+      const text = input instanceof File ? await input.text() : await new Response(input).text();
       const parsed = parseJsonArrayToCsvPayload(text, jsonArrayPath);
-      if ("error" in parsed) {
-        throw new Error(parsed.error);
+      if ("error" in parsed) throw new Error(parsed.error);
+      const bytes = input instanceof File ? input.size ?? 0 : new TextEncoder().encode(text).byteLength;
+      const stored = buildStoredDataset("json", parsed.csv.headers, parsed.csv.rows, bytes);
+      await persist(stored);
+      return stored.meta;
+    },
+
+    async putNdjson(input) {
+      const headersAcc: string[] = [];
+      const rows: Record<string, string>[] = [];
+      const stream = input instanceof File ? input.stream() : input;
+      for await (const row of iterateNdjsonRowsFromUint8Stream(stream)) {
+        mergeHeaderOrder(headersAcc, row);
+        rows.push({ ...row });
       }
-      const hint =
-        input instanceof File ? fileByteLength(input) : new TextEncoder().encode(text).byteLength;
-      const hdrs = [...parsed.csv.headers];
-      const useOpfs = hint >= OPFS_BODY_CHAR_THRESHOLD;
-      return ingestNdjsonLines(
-        "json",
-        hint,
-        useOpfs,
-        hdrs,
-        (async function* () {
-          for (const r of parsed.csv.rows) {
-            yield r;
-          }
-        })(),
-      );
+      const normalized = rows.map((row) => normalizeRow(headersAcc, row));
+      const bytes = input instanceof File ? input.size ?? 0 : estimatePayloadBytes({ headers: headersAcc, rows: normalized });
+      const stored = buildStoredDataset("ndjson", headersAcc, normalized, bytes);
+      await persist(stored);
+      return stored.meta;
     },
 
     async putNormalizedPayload(payload, format, bytesHint = 0) {
-      await ensureDuckDbReady();
-      const hint = Math.max(bytesHint, estimatePayloadBytes(payload));
-      const useOpfs = hint >= OPFS_BODY_CHAR_THRESHOLD;
-      return ingestNdjsonLines(
+      const stored = buildStoredDataset(
         format,
-        hint,
-        useOpfs,
         [...payload.headers],
-        (async function* () {
-          for (const r of payload.rows) {
-            yield normalizeScanRow(payload.headers, r);
-          }
-        })(),
+        payload.rows,
+        Math.max(bytesHint, estimatePayloadBytes(payload)),
       );
+      await persist(stored);
+      return stored.meta;
     },
 
     async meta(id) {
-      const row = await readIdbRowById(id);
+      const row = await readById(id);
       return row?.meta ?? null;
     },
 
     async *scan(id, opts) {
-      await ensureDuckDbReady();
-      const row = await readIdbRowById(id);
+      const row = await readById(id);
       if (row == null) return;
-      const headers = row.meta.headers ?? [];
       const offset = Math.max(0, opts?.offset ?? 0);
-      const limit = opts?.limit;
-      let rows: Record<string, string>[];
-      try {
-        rows = await queryScanRows(id, row, headers, offset, limit);
-      } catch {
-        rows = await scanRowsFromNdjsonFallback(id, row, headers, offset, limit);
-      }
-      for (const out of rows) {
-        yield out;
+      const limit = opts?.limit == null ? Number.POSITIVE_INFINITY : Math.max(0, opts.limit);
+      const end = Math.min(row.rows.length, offset + limit);
+      for (let i = offset; i < end; i++) {
+        yield { ...row.rows[i]! };
       }
     },
 
     async delete(id) {
-      await deleteOpfsDatasetDir(id);
-      const cached = sqlSourceByDatasetId.get(id);
-      if (cached != null) {
-        const duck = await getDuckDb().catch(() => null);
-        if (duck != null) {
-          if (cached.dropFileName) {
-            await duck.dropFile(cached.dropFileName).catch(() => undefined);
-          }
-          const fromPq = cached.fromSql.includes("read_parquet");
-          if (fromPq) {
-            const fileName = `dataset-${id}.parquet`;
-            await duck.dropFile(fileName).catch(() => undefined);
-          }
-          const conn = await duck.connect().catch(() => null);
-          if (conn != null && cached.fromSql.startsWith('"') === false) {
-            try {
-              // no-op, kept for compatibility with older cached table mode
-            } finally {
-              await conn.close();
-            }
-          }
-        }
-        sqlSourceByDatasetId.delete(id);
-      }
       const db = await openDb();
       if (db == null) return;
       const tx = db.transaction(STORE, "readwrite");
@@ -794,37 +246,19 @@ export function createDatasetStore(): DatasetStore {
       await transactionDone(tx);
       db.close();
       if (!Array.isArray(all)) return [];
-      return (all as IdbRow[])
+      return (all as StoredDataset[])
         .map((r) => r.meta)
         .filter((m): m is DatasetMeta => m != null)
         .sort((a, b) => b.createdAt - a.createdAt);
     },
 
     async prepareSqlSource(id) {
-      await ensureDuckDbReady();
-      const prepared = await ensureSqlSourceForDataset(id);
-      if (prepared == null) return null;
-      return {
-        headers: [...prepared.headers],
-        fromSql: prepared.fromSql,
-        cleanup: async () => {
-          // cached source remains hot for session reuse
-        },
-      };
+      void id;
+      return null;
     },
 
     async prewarmSqlSource(id) {
-      await ensureDuckDbReady();
-      await ensureSqlSourceForDataset(id);
+      void id;
     },
   };
-}
-
-function estimatePayloadBytes(payload: CsvPayload): number {
-  const enc = new TextEncoder();
-  let n = 0;
-  for (const row of payload.rows) {
-    n += enc.encode(`${JSON.stringify(row)}\n`).byteLength;
-  }
-  return n;
 }
