@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from "react";
 import { Handle, Position, useEdges, useNodes, useReactFlow, type NodeProps } from "@xyflow/react";
-import { useMergeUnionUpstreamMeta } from "../graph/useMergeUnionUpstreamMeta";
+import { useMergeUnionInputMeta } from "../graph/useMergeUnionInputMeta";
 import type {
   AppNode,
   MergeUnionNode as MergeUnionNodeType,
@@ -18,7 +18,7 @@ export function MergeUnionNode({ id, data }: NodeProps<MergeUnionNodeType>) {
   const edges = useEdges();
 
   const incoming = useMemo(() => edges.filter((e) => e.target === id), [edges, id]);
-  const { inputs: upstreamInputs, loading: upstreamLoading } = useMergeUnionUpstreamMeta(
+  const { inputs: upstreamInputs, loading: upstreamLoading } = useMergeUnionInputMeta(
     incoming,
     nodes,
     edges,

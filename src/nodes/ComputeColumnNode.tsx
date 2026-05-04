@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from "react";
 import { Handle, Position, useEdges, useNodes, useReactFlow, type NodeProps } from "@xyflow/react";
-import { useTabularHeadersFromEdge } from "../graph/useTabularHeadersFromEdge";
+import { useEdgeHeadersFromEdge } from "../graph/useEdgeHeadersFromEdge";
 import type {
   AppNode,
   ComputeColumnDef,
@@ -14,7 +14,7 @@ export function ComputeColumnNode({ id, data }: NodeProps<ComputeColumnNodeType>
   const edges = useEdges();
 
   const incomingEdge = useMemo(() => edges.find((edge) => edge.target === id) ?? null, [edges, id]);
-  const { headers } = useTabularHeadersFromEdge(incomingEdge, nodes, edges);
+  const { headers } = useEdgeHeadersFromEdge(incomingEdge, nodes, edges);
   const columns = useMemo(() => data.columns ?? [], [data.columns]);
 
   const duplicateOutputNames = useMemo(() => {

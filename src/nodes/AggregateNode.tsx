@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from "react";
 import { Handle, Position, useEdges, useNodes, useReactFlow, type NodeProps } from "@xyflow/react";
-import { useTabularHeadersFromEdge } from "../graph/useTabularHeadersFromEdge";
+import { useEdgeHeadersFromEdge } from "../graph/useEdgeHeadersFromEdge";
 import type {
   AggregateMetricDef,
   AggregateMetricOp,
@@ -23,7 +23,7 @@ export function AggregateNode({ id, data }: NodeProps<AggregateNodeType>) {
   const edges = useEdges();
 
   const incomingEdge = useMemo(() => edges.find((edge) => edge.target === id) ?? null, [edges, id]);
-  const { headers } = useTabularHeadersFromEdge(incomingEdge, nodes, edges);
+  const { headers } = useEdgeHeadersFromEdge(incomingEdge, nodes, edges);
   const groupKeys = useMemo(() => data.groupKeys ?? [], [data.groupKeys]);
   const metrics = useMemo(() => data.metrics ?? [], [data.metrics]);
 

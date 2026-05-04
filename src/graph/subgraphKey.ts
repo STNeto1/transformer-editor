@@ -1,25 +1,16 @@
 import type { Edge } from "@xyflow/react";
 import type { AppNode } from "../types/flow";
 
-/** Stable JSON for fingerprinting — keys sorted recursively so reordering inputs does not change the digest. */
 function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== "object") {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((v) => stableStringify(v)).join(",")}]`;
-  }
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((v) => stableStringify(v)).join(",")}]`;
   const obj = value as Record<string, unknown>;
   const keys = Object.keys(obj).sort();
   const parts = keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`);
   return `{${parts.join(",")}}`;
 }
 
-/**
- * Fingerprints upstream node `data` for tabular output invalidation — ignores React Flow positions.
- * Narrow `dataSource` to avoid hashing large optional inline `csv` / full `sample` cells unnecessarily.
- */
-function tabularUpstreamNodeFingerprint(node: AppNode): string {
+function nodeFingerprint(node: AppNode): string {
   switch (node.type) {
     case "dataSource": {
       const d = node.data;
@@ -52,14 +43,11 @@ function tabularUpstreamNodeFingerprint(node: AppNode): string {
   }
 }
 
-function edgeStructuralKey(e: Edge): string {
+function edgeKey(e: Edge): string {
   return [e.id, e.source, e.target, e.sourceHandle ?? "", e.targetHandle ?? ""].join("::");
 }
 
-/**
- * Nodes that can contribute an edge into `seedId` following reverse edges (`target → source`).
- */
-export function collectReverseUpstreamNodeIds(seedId: string, edges: Edge[]): string[] {
+export function collectUpstreamNodeIds(seedId: string, edges: Edge[]): string[] {
   const reachable = new Set<string>();
   const stack = [seedId];
   reachable.add(seedId);
@@ -77,42 +65,27 @@ export function collectReverseUpstreamNodeIds(seedId: string, edges: Edge[]): st
   return [...reachable].sort();
 }
 
-/**
- * Opaque fingerprint of every upstream node's tab-affecting `data`, plus the inbound edge topology
- * feeding `seedId`. Skips React Flow `position`/selection churn that would otherwise invalidate
- * async resolves on every frame.
- */
-export function upstreamSubgraphStaleKey(
-  seedSourceId: string,
-  edges: Edge[],
-  nodes: AppNode[],
-): string {
-  const ids = collectReverseUpstreamNodeIds(seedSourceId, edges);
+export function upstreamSubgraphKey(seedSourceId: string, edges: Edge[], nodes: AppNode[]): string {
+  const ids = collectUpstreamNodeIds(seedSourceId, edges);
   const idSet = new Set(ids);
   const upstreamEdges = edges
     .filter((e) => idSet.has(e.source) && idSet.has(e.target))
-    .map((e) => edgeStructuralKey(e))
+    .map((e) => edgeKey(e))
     .sort();
   const fingerprints = ids.map((nodeId) => {
     const n = nodes.find((x) => x.id === nodeId);
-    return n != null ? tabularUpstreamNodeFingerprint(n) : `missing:${nodeId}`;
+    return n != null ? nodeFingerprint(n) : `missing:${nodeId}`;
   });
   return `${ids.join(">")}#nodes:${fingerprints.join("|")}#edges:${upstreamEdges.join("|")}`;
 }
 
-/**
- * Fingerprint driving Visualization preview refresh: inbound edge identity + subgraph feeding the source.
- */
-export function visualizationUpstreamStaleKey(
+export function visualizationSubgraphKey(
   vizTargetId: string,
   edges: Edge[],
   nodes: AppNode[],
 ): string {
   const incoming = edges.find((e) => e.target === vizTargetId);
-  if (incoming == null) {
-    return `${vizTargetId}|no-inc`;
-  }
-  const seedSourceId = incoming.source;
-  const subgraphKey = upstreamSubgraphStaleKey(seedSourceId, edges, nodes);
-  return `${vizTargetId}|in:${edgeStructuralKey(incoming)}|seed:${seedSourceId}|${subgraphKey}`;
+  if (incoming == null) return `${vizTargetId}|no-inc`;
+  const subgraphKey = upstreamSubgraphKey(incoming.source, edges, nodes);
+  return `${vizTargetId}|in:${edgeKey(incoming)}|seed:${incoming.source}|${subgraphKey}`;
 }

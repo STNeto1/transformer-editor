@@ -2,10 +2,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Handle, Position, useEdges, useNodes, useReactFlow, type NodeProps } from "@xyflow/react";
 import { normalizeCsvFileName } from "../download/toCsv";
 import {
-  downloadCsvForEdgeAsync,
-  getRowCountForEdgeAsync,
-  getTabularOutputForEdgeAsync,
-} from "../graph/tabularOutput";
+  downloadEdgeCsvAsync,
+  getEdgeRowCountAsync,
+  getEdgePreviewAsync,
+} from "../graph/edgeRuntime";
 import type { AppNode, DownloadNode as DownloadNodeType, DownloadNodeData } from "../types/flow";
 
 export function DownloadNode({ id, data }: NodeProps<DownloadNodeType>) {
@@ -26,12 +26,12 @@ export function DownloadNode({ id, data }: NodeProps<DownloadNodeType>) {
     }
     let cancelled = false;
     void Promise.all([
-      getTabularOutputForEdgeAsync(incomingEdge, nodes, edges),
-      getRowCountForEdgeAsync(incomingEdge, nodes, edges),
-    ]).then(([rs, count]) => {
-      if (cancelled || rs == null) return;
+      getEdgePreviewAsync(incomingEdge, nodes, edges, 1),
+      getEdgeRowCountAsync(incomingEdge, nodes, edges),
+    ]).then(([preview, count]) => {
+      if (cancelled) return;
       setRowCount(count);
-      setColCount(rs.headers.length);
+      setColCount(preview.headers.length);
     });
     return () => {
       cancelled = true;
@@ -57,7 +57,7 @@ export function DownloadNode({ id, data }: NodeProps<DownloadNodeType>) {
     if (incomingEdge == null) return;
     setBusy(true);
     try {
-      const blob = await downloadCsvForEdgeAsync(incomingEdge, nodes, edges);
+      const blob = await downloadEdgeCsvAsync(incomingEdge, nodes, edges);
       if (blob == null) return;
       const link = document.createElement("a");
       const objectUrl = URL.createObjectURL(blob);

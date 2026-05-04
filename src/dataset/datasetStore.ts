@@ -5,12 +5,6 @@ import type { DatasetFormat, DatasetId, DatasetMeta, DatasetScanOptions } from "
 
 export type { DatasetFormat, DatasetId, DatasetMeta, DatasetScanOptions };
 
-export type DatasetSqlSource = {
-  headers: string[];
-  fromSql: string;
-  cleanup(): Promise<void>;
-};
-
 const DB_NAME = "etl-ui-datasets";
 const DB_VERSION = 1;
 const STORE = "datasets";
@@ -135,8 +129,6 @@ export interface DatasetStore {
   scan(id: DatasetId, opts?: DatasetScanOptions): AsyncIterable<Record<string, string>>;
   delete(id: DatasetId): Promise<void>;
   list(): Promise<DatasetMeta[]>;
-  prepareSqlSource(id: DatasetId): Promise<DatasetSqlSource | null>;
-  prewarmSqlSource(id: DatasetId): Promise<void>;
 }
 
 export function createDatasetStore(): DatasetStore {
@@ -181,7 +173,8 @@ export function createDatasetStore(): DatasetStore {
       const text = input instanceof File ? await input.text() : await new Response(input).text();
       const parsed = parseJsonArrayToCsvPayload(text, jsonArrayPath);
       if ("error" in parsed) throw new Error(parsed.error);
-      const bytes = input instanceof File ? input.size ?? 0 : new TextEncoder().encode(text).byteLength;
+      const bytes =
+        input instanceof File ? (input.size ?? 0) : new TextEncoder().encode(text).byteLength;
       const stored = buildStoredDataset("json", parsed.csv.headers, parsed.csv.rows, bytes);
       await persist(stored);
       return stored.meta;
@@ -196,7 +189,10 @@ export function createDatasetStore(): DatasetStore {
         rows.push({ ...row });
       }
       const normalized = rows.map((row) => normalizeRow(headersAcc, row));
-      const bytes = input instanceof File ? input.size ?? 0 : estimatePayloadBytes({ headers: headersAcc, rows: normalized });
+      const bytes =
+        input instanceof File
+          ? (input.size ?? 0)
+          : estimatePayloadBytes({ headers: headersAcc, rows: normalized });
       const stored = buildStoredDataset("ndjson", headersAcc, normalized, bytes);
       await persist(stored);
       return stored.meta;
@@ -250,15 +246,6 @@ export function createDatasetStore(): DatasetStore {
         .map((r) => r.meta)
         .filter((m): m is DatasetMeta => m != null)
         .sort((a, b) => b.createdAt - a.createdAt);
-    },
-
-    async prepareSqlSource(id) {
-      void id;
-      return null;
-    },
-
-    async prewarmSqlSource(id) {
-      void id;
     },
   };
 }

@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from "react";
 import { Handle, Position, useEdges, useNodes, useReactFlow, type NodeProps } from "@xyflow/react";
 import { FilterRulesPanel } from "../components/FilterRulesPanel";
-import { useTabularHeadersFromEdge } from "../graph/useTabularHeadersFromEdge";
+import { useEdgeHeadersFromEdge } from "../graph/useEdgeHeadersFromEdge";
 import { SWITCH_DEFAULT_HANDLE, switchBranchSourceHandle } from "../switch/branches";
 import type {
   AppNode,
@@ -16,7 +16,7 @@ export function SwitchNode({ id, data }: NodeProps<SwitchNodeType>) {
   const edges = useEdges();
 
   const incomingEdge = useMemo(() => edges.find((edge) => edge.target === id) ?? null, [edges, id]);
-  const { headers, loading } = useTabularHeadersFromEdge(incomingEdge, nodes, edges);
+  const { headers, loading } = useEdgeHeadersFromEdge(incomingEdge, nodes, edges);
   const branches = useMemo(() => data.branches ?? [], [data.branches]);
 
   const patchData = useCallback(

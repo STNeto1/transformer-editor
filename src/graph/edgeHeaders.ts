@@ -9,11 +9,7 @@ function getIncomingEdge(nodeId: string, edges: Edge[]): Edge | null {
   return edges.find((e) => e.target === nodeId) ?? null;
 }
 
-/**
- * Column headers for rule UIs when the chain is Data source → … → this node with only
- * pass-through / visualization hops (no renames). Otherwise returns null — use async tabular.
- */
-export function tryUpstreamDataSourceHeaders(
+export function trySourceHeaders(
   sourceNodeId: string,
   nodes: AppNode[],
   edges: Edge[],
@@ -31,7 +27,7 @@ export function tryUpstreamDataSourceHeaders(
   const singleIn = (): string[] | null => {
     const inc = getIncomingEdge(sourceNodeId, edges);
     if (inc == null) return null;
-    return tryUpstreamDataSourceHeaders(inc.source, nodes, edges, visited);
+    return trySourceHeaders(inc.source, nodes, edges, visited);
   };
 
   if (
@@ -79,7 +75,7 @@ export function tryUpstreamDataSourceHeaders(
     const headers: string[] = [];
     const seen = new Set<string>();
     for (const edge of ins) {
-      const up = tryUpstreamDataSourceHeaders(edge.source, nodes, edges, new Set(visited));
+      const up = trySourceHeaders(edge.source, nodes, edges, new Set(visited));
       if (up == null) continue;
       for (const h of up) {
         if (seen.has(h)) continue;
@@ -93,10 +89,10 @@ export function tryUpstreamDataSourceHeaders(
   return null;
 }
 
-export function tryUpstreamHeadersForIncomingEdge(
+export function tryHeadersForIncomingEdge(
   incoming: Edge,
   nodes: AppNode[],
   edges: Edge[],
 ): string[] | null {
-  return tryUpstreamDataSourceHeaders(incoming.source, nodes, edges);
+  return trySourceHeaders(incoming.source, nodes, edges);
 }

@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { Edge } from "@xyflow/react";
 import { defaultDataSourceData, type AppNode } from "../types/flow";
 import { CONDITIONAL_ELSE_HANDLE, CONDITIONAL_IF_HANDLE } from "../conditional/branches";
-import { tryUpstreamHeadersForIncomingEdge } from "./upstreamHeaders";
+import { tryHeadersForIncomingEdge } from "./edgeHeaders";
 
-describe("tryUpstreamHeadersForIncomingEdge", () => {
+describe("tryHeadersForIncomingEdge", () => {
   it("resolves headers through conditional branch merge chain", () => {
     const nodes: AppNode[] = [
       {
@@ -70,7 +70,7 @@ describe("tryUpstreamHeadersForIncomingEdge", () => {
 
     const inEdge = edges.find((e) => e.target === "filter");
     expect(inEdge).toBeTruthy();
-    const headers = tryUpstreamHeadersForIncomingEdge(inEdge!, nodes, edges);
+    const headers = tryHeadersForIncomingEdge(inEdge!, nodes, edges);
     expect(headers).toEqual(["id", "name", "company"]);
   });
 });

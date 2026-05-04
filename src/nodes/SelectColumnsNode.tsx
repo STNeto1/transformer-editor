@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from "react";
 import { Handle, Position, useEdges, useNodes, useReactFlow, type NodeProps } from "@xyflow/react";
-import { useTabularHeadersFromEdge } from "../graph/useTabularHeadersFromEdge";
+import { useEdgeHeadersFromEdge } from "../graph/useEdgeHeadersFromEdge";
 import type {
   AppNode,
   SelectColumnsNode as SelectColumnsNodeType,
@@ -13,7 +13,7 @@ export function SelectColumnsNode({ id, data }: NodeProps<SelectColumnsNodeType>
   const edges = useEdges();
 
   const incomingEdge = useMemo(() => edges.find((edge) => edge.target === id) ?? null, [edges, id]);
-  const { headers, loading } = useTabularHeadersFromEdge(incomingEdge, nodes, edges);
+  const { headers, loading } = useEdgeHeadersFromEdge(incomingEdge, nodes, edges);
   const selectedColumns = useMemo(() => data.selectedColumns ?? [], [data.selectedColumns]);
 
   const selectedSet = useMemo(() => new Set(selectedColumns), [selectedColumns]);

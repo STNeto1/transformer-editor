@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from "react";
 import { Handle, Position, useEdges, useNodes, useReactFlow, type NodeProps } from "@xyflow/react";
-import { useTabularHeadersFromEdge } from "../graph/useTabularHeadersFromEdge";
-import { useTabularRowCountFromEdge } from "../graph/useTabularRowCountFromEdge";
+import { useEdgeHeadersFromEdge } from "../graph/useEdgeHeadersFromEdge";
+import { useEdgeRowCountFromEdge } from "../graph/useEdgeRowCountFromEdge";
 import { JOIN_LEFT_TARGET, JOIN_RIGHT_TARGET } from "../join/handles";
 import type {
   AppNode,
@@ -25,10 +25,10 @@ export function JoinNode({ id, data }: NodeProps<JoinNodeType>) {
     [edges, id],
   );
 
-  const { headers: leftHeaders } = useTabularHeadersFromEdge(leftEdge, nodes, edges);
-  const { headers: rightHeaders } = useTabularHeadersFromEdge(rightEdge, nodes, edges);
-  const { rowCount: leftRowCount } = useTabularRowCountFromEdge(leftEdge, nodes, edges);
-  const { rowCount: rightRowCount } = useTabularRowCountFromEdge(rightEdge, nodes, edges);
+  const { headers: leftHeaders } = useEdgeHeadersFromEdge(leftEdge, nodes, edges);
+  const { headers: rightHeaders } = useEdgeHeadersFromEdge(rightEdge, nodes, edges);
+  const { rowCount: leftRowCount } = useEdgeRowCountFromEdge(leftEdge, nodes, edges);
+  const { rowCount: rightRowCount } = useEdgeRowCountFromEdge(rightEdge, nodes, edges);
 
   const leftConnected = leftEdge != null;
   const rightConnected = rightEdge != null;

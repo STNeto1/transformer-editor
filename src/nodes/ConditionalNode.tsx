@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Handle, Position, useEdges, useNodes, useReactFlow, type NodeProps } from "@xyflow/react";
 import { FilterRulesPanel } from "../components/FilterRulesPanel";
-import { tryUpstreamHeadersForIncomingEdge } from "../graph/upstreamHeaders";
-import { useTabularHeadersFromEdge } from "../graph/useTabularHeadersFromEdge";
+import { tryHeadersForIncomingEdge } from "../graph/edgeHeaders";
+import { useEdgeHeadersFromEdge } from "../graph/useEdgeHeadersFromEdge";
 import { CONDITIONAL_ELSE_HANDLE, CONDITIONAL_IF_HANDLE } from "../conditional/branches";
 import type {
   AppNode,
@@ -39,10 +39,10 @@ export function ConditionalNode({ id, data }: NodeProps<ConditionalNodeType>) {
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const incomingEdge = useMemo(() => edges.find((e) => e.target === id) ?? null, [edges, id]);
-  const { headers: fetchedHeaders } = useTabularHeadersFromEdge(incomingEdge, nodes, edges);
+  const { headers: fetchedHeaders } = useEdgeHeadersFromEdge(incomingEdge, nodes, edges);
   const headers = useMemo(() => {
     if (incomingEdge == null) return [];
-    const fast = tryUpstreamHeadersForIncomingEdge(incomingEdge, nodes, edges);
+    const fast = tryHeadersForIncomingEdge(incomingEdge, nodes, edges);
     if (fast != null && fast.length > 0) return fast;
     return fetchedHeaders;
   }, [incomingEdge, nodes, edges, fetchedHeaders]);

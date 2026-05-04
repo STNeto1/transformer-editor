@@ -11,13 +11,13 @@ import {
   type Edge,
   type NodeProps,
 } from "@xyflow/react";
-import { getPreviewForEdgeAsync, getRowCountForEdgeAsync } from "../graph/tabularOutput";
+import { getEdgePreviewAsync, getEdgeRowCountAsync } from "../graph/edgeRuntime";
 import type {
   AppNode,
   VisualizationNode as VisualizationNodeType,
   VisualizationNodeData,
 } from "../types/flow";
-import { visualizationUpstreamStaleKey } from "../graph/tabularStaleKey";
+import { visualizationSubgraphKey } from "../graph/subgraphKey";
 
 const DEFAULT_PREVIEW_ROWS = 100;
 const MAX_PREVIEW_ROWS = 10_000;
@@ -245,12 +245,7 @@ const previewMachine = setup({
       const parentId = input.incomingEdge.source;
       const parent = input.nodes.find((n) => n.id === parentId);
       const cap = Math.min(MAX_PREVIEW_ROWS, Math.max(1, input.requestedRows));
-      const preview = await getPreviewForEdgeAsync(
-        input.incomingEdge,
-        input.nodes,
-        input.edges,
-        cap,
-      );
+      const preview = await getEdgePreviewAsync(input.incomingEdge, input.nodes, input.edges, cap);
       if (preview.headers.length === 0 && preview.rows.length === 0) {
         return {
           kind: "no-data",
@@ -272,7 +267,7 @@ const previewMachine = setup({
       if (input.incomingEdge == null) return null;
       return await new Promise<number | null>((resolve) => {
         const run = () => {
-          void getRowCountForEdgeAsync(input.incomingEdge!, input.nodes, input.edges)
+          void getEdgeRowCountAsync(input.incomingEdge!, input.nodes, input.edges)
             .then((value) => resolve(value))
             .catch(() => resolve(null));
         };
@@ -450,7 +445,7 @@ export function VisualizationNode({ id, data }: NodeProps<VisualizationNodeType>
   const [exploreState, sendExplore] = useMachine(exploreUiMachine);
 
   const upstreamStaleKey = useMemo(
-    () => visualizationUpstreamStaleKey(id, edges, nodes),
+    () => visualizationSubgraphKey(id, edges, nodes),
     [edges, id, nodes],
   );
 

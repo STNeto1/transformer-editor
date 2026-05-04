@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from "react";
 import { Handle, Position, useEdges, useNodes, useReactFlow, type NodeProps } from "@xyflow/react";
-import { useTabularPayloadFromEdge } from "../graph/useTabularPayloadFromEdge";
+import { useEdgePayloadFromEdge } from "../graph/useEdgePayloadFromEdge";
 import { inferColumnTypes } from "./inferCsvColumnTypes";
 import type {
   AppNode,
@@ -27,7 +27,7 @@ export function CastColumnsNode({ id, data }: NodeProps<CastColumnsNodeType>) {
   const edges = useEdges();
 
   const incomingEdge = useMemo(() => edges.find((edge) => edge.target === id) ?? null, [edges, id]);
-  const { payload, loading } = useTabularPayloadFromEdge(incomingEdge, nodes, edges);
+  const { payload, loading } = useEdgePayloadFromEdge(incomingEdge, nodes, edges);
   const headers = useMemo(() => payload?.headers ?? [], [payload]);
   const inferredByColumn = useMemo(() => {
     if (payload == null) return new Map<string, string>();
